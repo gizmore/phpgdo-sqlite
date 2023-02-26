@@ -23,18 +23,11 @@ use GDO\Core\GDT_Decimal;
 use GDO\Core\GDT_Enum;
 use GDO\Core\GDT_Index;
 use GDO\Date\GDT_DateTime;
+use GDO\Core\GDO_DBException;
+use GDO\Core\GDT_ObjectSelect;
 
 /**
  * SQLite DBMS module for phpgdo.
- * 
- * This is a required multi-provider module.
- * Minimalistic API to support a DBMS.
- * Configuration is done in protected/config.php
- * 
- * The DBMS *only* has to generate create code for around 18 core types.
- * The rest of the system uses only these core types to generate composites or alikes.
- * 
- * The-Auto-Migration-Idea is worth a look!
  * 
  * @author gizmore
  * @version 7.0.2
@@ -44,7 +37,7 @@ final class Module_DBMS extends GDO_Module
 {
 	public int $priority = 7;
 	
-	private \SQLite3 $sqLite;
+	private ?\SQLite3 $sqLite = null;
 
 	##############
 	### Module ###
@@ -66,25 +59,25 @@ final class Module_DBMS extends GDO_Module
 	################
 	### DBMS API ###
 	################
-	public function dbmsOpen(string $host, string $user, string $pass, string $database=null, int $port=3306): \mysqli
+	public function dbmsOpen(string $host, string $user, string $pass, string $database=null, int $port=3306): \SQLite3
 	{
-		$this->sqLite = new \SQLite3($host);
-		\SQLite3::
-		$this->link = mysqli_connect($host, $user, $pass, $database, $port);
-		$this->dbmsQuery("SET NAMES UTF8");
-		$this->dbmsQuery("SET time_zone = '+00:00'");
-		return $this->link;
+		$path = GDO_PATH . GDO_FILES_DIR . '/' . $database;
+		$this->sqLite = new \SQLite3($path);
+		$this->dbmsQry('PRAGMA encoding = "UTF-8"');
+		$this->dbmsQry('PRAGMA encoding = "UTF-8"');
+		$this->dbmsForeignKeys(true);
+		return $this->sqLite;
 	}
-	
 	public function dbmsClose(): void
 	{
-		mysqli_close($this->link);
+		$this->sqLite->close();
+		unset($this->sqLite);
 	}
 	
 	public function dbmsForeignKeys(bool $foreignKeysEnabled): void
 	{
-		$check = (int)$foreignKeysEnabled;
-		$this->dbmsQry("SET foreign_key_checks = {$check}");
+		$onoff = $foreignKeysEnabled ? 'ON' : 'OFF';
+		$this->dbmsQry("PRAGMA foreign_keys = {$onoff}");
 	}
 	
 	public function dbmsQry(string $query)
@@ -94,79 +87,117 @@ final class Module_DBMS extends GDO_Module
 	
 	public function dbmsQuery(string $query, bool $buffered=true)
 	{
-		return mysqli_query($this->link, $query);
+		$result = @$this->sqLite->query($query);
+		if (!$result)
+		{
+			throw new GDO_DBException('err_db', [$this->dbmsErrno(), $this->dbmsError(), html($query)]);
+		}
+		return $result;
 	}
 	
-	public function dbmsFree(\mysqli_result $result): void
+	public function dbmsFree(\SQLite3Result $result): void
 	{
-		mysqli_free_result($result);
+		$result->finalize();
 	}
 	
-	public function dbmsFetchRow(\mysqli_result $result): ?array
+	public function dbmsFetchRow(\SQLite3Result $result): ?array
 	{
-		return mysqli_fetch_row($result);
+		$row = $result->fetchArray(SQLITE3_NUM);
+		return $row ? $row : null;
 	}
 	
-	public function dbmsFetchAll(\mysqli_result $result): ?array
+	public function dbmsFetchAllRows(\SQLite3Result $result): array
 	{
-		return mysqli_fetch_all($result);
+		return $this->_fetchAllB($result, SQLITE3_NUM);
 	}
 	
-	public function dbmsFetchAssoc(\mysqli_result $result): ?array
+	public function dbmsFetchAssoc(\SQLite3Result $result): ?array
 	{
-		return mysqli_fetch_assoc($result);
+		$row = $result->fetchArray(SQLITE3_ASSOC);
+		return $row ? $row : null;
 	}
 	
-	public function dbmsNumRows($result): int
+	public function dbmsFetchAllAssoc(\SQLite3Result $result): array
 	{
-		return mysqli_num_rows($result);
+		return $this->_fetchAllB($result, SQLITE3_ASSOC);
+	}
+	
+	private function _fetchAllB(\SQLite3Result $result, int $mode): array
+	{
+		$back = [];
+		while ($row = $result->fetchArray($mode))
+		{
+			$back[] = $row;
+		}
+		return $back;
+	}
+	
+	/**
+	 * @deprecated slow
+	 */
+	public function dbmsNumRows(\SQLite3Result $result): int
+	{
+		$count = 0;
+		while ($result->fetchArray(SQLITE3_NUM))
+		{
+			$count++;
+		}
+		$result->reset();
+		return $count;
 	}
 	
 	public function dbmsInsertId(): int
 	{
-		return mysqli_insert_id($this->link);
+		return $this->sqLite->lastInsertRowID();
 	}
 	
 	public function dbmsAffected(): int
 	{
-		return mysqli_affected_rows($this->link);
+		return $this->sqLite->changes();
 	}
+	
+	private bool $inTransaction = false;
 	
 	public function dbmsBegin(): void
 	{
-		mysqli_begin_transaction($this->link);
+		if (!$this->inTransaction)
+		{
+			$this->inTransaction = true;
+			$this->dbmsQry("BEGIN");
+		}
 	}
 	
 	public function dbmsCommit(): void
 	{
-		mysqli_commit($this->link);
+		$this->inTransaction = false;
+		$this->dbmsQry("COMMIT");
 	}
 	
 	public function dbmsRollback(): void
 	{
-		mysqli_rollback($this->link);
+		$this->inTransaction = false;
+		$this->dbmsQry("ROLLBACK");
 	}
 	
+	/**
+	 * @TODO In case sqlite session locking is required, implement an flock based one.
+	 */
 	public function dbmsLock(string $lock, int $timeout=30): void
 	{
-		$query = "SELECT GET_LOCK('{$lock}', {$timeout}) as L";
-		$this->dbmsQuery($query, false);
 	}
 	
 	public function dbmsUnlock(string $lock): void
 	{
-		$query = "SELECT RELEASE_LOCK('{$lock}') AS L";
-		$this->dbmsQuery($query, false);
 	}
 	
 	public function dbmsError(): string
 	{
-		return mysqli_error($this->link);
+		return $this->sqLite->lastErrorMsg();
 	}
 	
 	public function dbmsErrno(): int
 	{
-		return mysqli_errno($this->link);
+		return $this->sqLite->lastErrorCode();
 	}
 	
 	############
@@ -254,7 +285,7 @@ final class Module_DBMS extends GDO_Module
 		if (count($primary))
 		{
 			$primary = implode(',', $primary);
-			$columns[] = "PRIMARY KEY ($primary) " . Database::PRIMARY_USING;
+			$columns[] = "PRIMARY KEY ($primary) "; # . Database::PRIMARY_USING;
 		}
 		
 		foreach ($gdo->gdoColumnsCache() as $column)
@@ -265,10 +296,18 @@ final class Module_DBMS extends GDO_Module
 			}
 		}
 		
+		foreach ($gdo->gdoColumnsCache() as $column)
+		{
+			if ($column instanceof GDT_Object)
+			{
+				$columns[] = $this->_objfk($column);
+			}
+		}
+		
 		$columnsCode = implode(",\n", $columns);
 		
 		$query = "CREATE TABLE IF NOT EXISTS {$gdo->gdoTableIdentifier()} ".
-			"(\n$columnsCode\n) ENGINE = {$gdo->gdoEngine()}";
+			"(\n$columnsCode\n)\n";
 		
 		return $query;
 	}
@@ -299,29 +338,68 @@ final class Module_DBMS extends GDO_Module
 		throw new GDO_Error('err_gdt_column_define_missing', [$gdt->getName(), get_class($gdt)]);
 	}
 	
+	##############
+	### Compat ###
+	##############
+	public function dbmsEscape(string $var): string
+	{
+		return str_replace(['\\', "'"], ['\\\\', '\\\''], $var);
+	}
+	
+	public function dbmsQuote(string $var): string
+	{
+		return sprintf("'%s'", $this->dbmsEscape($var));
+	}
+	
+	public function dbmsConcat(string ...$fields): string
+	{
+		return implode(' || ', $fields);
+	}
+	
+	public function dbmsTimestamp(string $arg): string
+	{
+		return sprintf("strftime('%%s', %s)", $arg);
+	}
+	
+	public function dbmsFromUnixtime(int $time=0): string
+	{
+		$time = $time?:time();
+		return "DATETIME({$time}, 'unixepoch')";
+	}
+	
 	###############
 	### Columns ###
 	###############
 	public function Core_GDT_AutoInc(GDT_AutoInc $gdt): string
 	{
-		return "{$gdt->identifier()} {$this->gdoSizeDefine($gdt)}INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY";
+		return "{$gdt->identifier()} INTEGER PRIMARY KEY NOT NULL";
 	}
 	
 	public function Core_GDT_Int(GDT_Int $gdt): string
 	{
-		$unsigned = $gdt->unsigned ? " UNSIGNED" : "";
+		$unsigned = $gdt->unsigned ? ' UNSIGNED' : '';
 		return "{$gdt->identifier()} {$this->gdoSizeDefine($gdt)}INT{$unsigned}{$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
 	}
 	
+	/**
+	 * SQLite does not feature enums. :(
+	 * We use a string instead, until a better solution is found.
+	 */
 	public function Core_GDT_Enum(GDT_Enum $gdt): string
 	{
-		$values = implode(',', array_map([GDO::class, 'quoteS'], $gdt->enumValues));
-		return "{$gdt->identifier()} ENUM ($values) CHARSET ascii COLLATE ascii_bin {$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
+		$max = 0;
+		foreach ($gdt->enumValues as $val)
+		{
+			$len = mb_strlen($val);
+			$max = $len > $max ? $len : $max;
+		}
+		$str = GDT_String::make($gdt->name)->max($max)->notNull($gdt->notNull)->primary($gdt->primary);
+		return $this->Core_GDT_String($str);
 	}
 	
 	public function Core_GDT_Checkbox(GDT_Checkbox $gdt) : string
 	{
-		return "{$gdt->identifier()} TINYINT(1) UNSIGNED {$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
+		return "{$gdt->identifier()} TINYINT UNSIGNED {$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
 	}
 	
 	public function Core_GDT_Float(GDT_Float $gdt): string
@@ -338,18 +416,15 @@ final class Module_DBMS extends GDO_Module
 
 	public function Core_GDT_Char(GDT_Char $gdt): string
 	{
-		$collate = $this->gdoCollateDefine($gdt, $gdt->caseSensitive);
-		return "{$gdt->identifier()} CHAR({$gdt->max}) CHARSET {$this->gdoCharsetDefine($gdt)} {$collate}" .
+		return "{$gdt->identifier()} CHAR({$gdt->max})" .
 			$this->gdoNullDefine($gdt) .
 			$this->gdoInitialDefine($gdt);
 	}
 	
 	public function Core_GDT_String(GDT_String $gdt): string
 	{
-		$charset = $this->gdoCharsetDefine($gdt);
-		$collate = $this->gdoCollateDefine($gdt, $gdt->caseSensitive);
 		$null = $this->gdoNullDefine($gdt);
-		return "{$gdt->identifier()} VARCHAR({$gdt->max}) CHARSET {$charset}{$collate}{$null}";
+		return "{$gdt->identifier()} VARCHAR({$gdt->max}) {$null}";
 	}
 	
 	public function Core_GDT_Text(GDT_Text $gdt): string
@@ -359,13 +434,15 @@ final class Module_DBMS extends GDO_Module
 	
 	public function Core_GDT_TextB(GDT_Text $gdt): string
 	{
-		$collate = $this->gdoCollateDefine($gdt, $gdt->caseSensitive);
-		return "TEXT({$gdt->max}) CHARSET {$this->gdoCharsetDefine($gdt)}{$collate}{$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
+		return "TEXT({$gdt->max}) {$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
 	}
 	
 	public function Core_GDT_CreatedAt(GDT_CreatedAt $gdt) : string
 	{
-		return "{$gdt->identifier()} TIMESTAMP({$gdt->millis}){$this->gdoNullDefine($gdt)} DEFAULT CURRENT_TIMESTAMP({$gdt->millis})";
+		$len = strlen('YYYY-MM-DD HH:ii:ss');
+		$len += $gdt->millis ? 1 : 0;
+		$len += $gdt->millis;
+		return "{$gdt->identifier()} CHAR({$len}) {$this->gdoNullDefine($gdt)}";
 	}
 	
 	public function Date_GDT_Date(GDT_Date $gdt) : string
@@ -383,16 +460,20 @@ final class Module_DBMS extends GDO_Module
 		return "{$gdt->identifier()} TIME {$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
 	}
 	
-	
 	public function Date_GDT_Timestamp(GDT_Timestamp $gdt) : string
 	{
 		return "{$gdt->identifier()} TIMESTAMP({$gdt->millis}){$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
 	}
 	
+	public function Core_GDT_ObjectSelect(GDT_ObjectSelect $gdt): string
+	{
+		return $this->Core_GDT_Object($gdt);
+	}
+	
 	/**
 	 * Take the foreign key primary key definition and use str_replace to convert to foreign key definition.
 	 */
-	public function Core_GDT_Object(GDT_Object $gdt): string
+	public function Core_GDT_Object($gdt): string
 	{
 		if ( !($table = $gdt->table))
 		{
@@ -414,14 +495,21 @@ final class Module_DBMS extends GDO_Module
 		$define = str_replace(' PRIMARY KEY', '', $define);
 		$define = str_replace(' AUTO_INCREMENT', '', $define);
 		$define = preg_replace('#,FOREIGN KEY .* ON UPDATE (?:CASCADE|RESTRICT|SET NULL)#', '', $define);
-		$on = $primaryKey->identifier();
-		return "$define{$this->gdoNullDefine($gdt)}" .
-			",FOREIGN KEY ({$gdt->identifier()}) REFERENCES $tableName($on) ON DELETE {$gdt->cascade} ON UPDATE CASCADE";
+		return "$define{$this->gdoNullDefine($gdt)}\n";
 	}
 	
-	public function Core_GDO_Index(GDT_Index $gdt)
+	private function _objfk(GDT_Object $gdt): string
 	{
-		return "{$this->fulltextDefine()} INDEX({$gdt->indexColumns}) {$this->usingDefine($gdt)}";
+		$table = $gdt->table;
+		$tableName = $table->gdoTableIdentifier();
+		$primaryKey = $table->gdoPrimaryKeyColumn();
+		$on = $primaryKey->identifier();
+		return "FOREIGN KEY ({$gdt->identifier()}) REFERENCES $tableName($on)";
+	}
+	
+	public function Core_GDT_Index(GDT_Index $gdt)
+	{
+		return "{$this->gdoFulltextDefine($gdt)} INDEX({$gdt->indexColumns}) {$this->gdoUsingDefine($gdt)}";
 	}
 	
 	##############
@@ -434,8 +522,7 @@ final class Module_DBMS extends GDO_Module
 	
 	private function gdoInitialDefine(GDT_DBField $gdt) : string
 	{
-		return isset($gdt->initial) ?
-		(' DEFAULT '.GDO::quoteS($gdt->initial)) : '';
+		return isset($gdt->initial) ? (' DEFAULT '.GDO::quoteS($gdt->initial)) : '';
 	}
 	
 	private function gdoSizeDefine(GDT_Int $gdt): string
@@ -452,13 +539,7 @@ final class Module_DBMS extends GDO_Module
 	
 	private function gdoCharsetDefine(GDT_String $gdt) : string
 	{
-		switch ($gdt->encoding)
-		{
-			case GDT_String::UTF8: return 'utf8mb4';
-			case GDT_String::ASCII: return 'ascii';
-			case GDT_String::BINARY: return 'binary';
-			default: throw new GDO_Error('err_string_encoding', [$gdt->encoding]);
-		}
+		return '';
 	}
 	
 	private function gdoCollateDefine(GDT_String $gdt, bool $caseSensitive) : string
