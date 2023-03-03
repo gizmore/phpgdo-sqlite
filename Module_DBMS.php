@@ -25,6 +25,9 @@ use GDO\Core\GDT_Index;
 use GDO\Date\GDT_DateTime;
 use GDO\Core\GDO_DBException;
 use GDO\Core\GDT_ObjectSelect;
+use GDO\Util\FileUtil;
+use GDO\Core\Application;
+use GDO\Util\Strings;
 
 /**
  * SQLite DBMS module for phpgdo.
@@ -37,7 +40,9 @@ final class Module_DBMS extends GDO_Module
 {
 	public int $priority = 7;
 	
-	private ?\SQLite3 $sqLite = null;
+	private ?string $database = null; # absolute database file path
+	private ?\SQLite3 $sqLite = null; # connection
+	private bool $inTransaction = false;
 
 	##############
 	### Module ###
@@ -59,19 +64,35 @@ final class Module_DBMS extends GDO_Module
 	################
 	### DBMS API ###
 	################
+	/**
+	 * Connect and setup a connection.
+	 * If not installing, respect foreign keys and read-only. 
+	 */
 	public function dbmsOpen(string $host, string $user, string $pass, string $database=null, int $port=3306): \SQLite3
 	{
-		$path = GDO_PATH . GDO_FILES_DIR . '/' . $database;
-		$this->sqLite = new \SQLite3($path);
+		$this->dbmsCreateDB($database);
+		$this->sqLite = new \SQLite3($this->database);
 		$this->dbmsQry('PRAGMA encoding = "UTF-8"');
-		$this->dbmsQry('PRAGMA encoding = "UTF-8"');
-		$this->dbmsForeignKeys(true);
+		$this->dbmsQry('PRAGMA journal_mode = "'.GDO_DB_ENGINE.'"');
+		if (!Application::$INSTANCE->isInstall())
+		{
+			$this->dbmsForeignKeys(true);
+			$this->dbmsQry('PRAGMA query_only = "'.(GDO_DB_READONLY?'ON':'OFF').'"');
+		}
+		$this->sqLite->createCollation('ascii_cs', 'strnatcmp');
+		$this->sqLite->createCollation('ascii_ci', 'strnatcasecmp');
+		$this->sqLite->createCollation('utf8_cs', [$this, 'collate_utf8_cs']);
+		$this->sqLite->createCollation('utf8_ci', [$this, 'collate_utf8_ci']);
 		return $this->sqLite;
 	}
+	
 	public function dbmsClose(): void
 	{
-		$this->sqLite->close();
-		unset($this->sqLite);
+		if (isset($this->sqLite))
+		{
+			$this->sqLite->close();
+			unset($this->sqLite);
+		}
 	}
 	
 	public function dbmsForeignKeys(bool $foreignKeysEnabled): void
@@ -156,8 +177,6 @@ final class Module_DBMS extends GDO_Module
 		return $this->sqLite->changes();
 	}
 	
-	private bool $inTransaction = false;
-	
 	public function dbmsBegin(): void
 	{
 		if (!$this->inTransaction)
@@ -169,14 +188,20 @@ final class Module_DBMS extends GDO_Module
 	
 	public function dbmsCommit(): void
 	{
-		$this->inTransaction = false;
-		$this->dbmsQry("COMMIT");
+		if ($this->inTransaction)
+		{
+			$this->inTransaction = false;
+			$this->dbmsQry("COMMIT");
+		}
 	}
 	
 	public function dbmsRollback(): void
 	{
-		$this->inTransaction = false;
-		$this->dbmsQry("ROLLBACK");
+		if ($this->inTransaction)
+		{
+			$this->inTransaction = false;
+			$this->dbmsQry("ROLLBACK");
+		}
 	}
 	
 	/**
@@ -236,17 +261,19 @@ final class Module_DBMS extends GDO_Module
 	##########
 	public function dbmsCreateDB(string $dbName): void
 	{
-		$this->dbmsQry("CREATE DATABASE {$dbName}");
+		$this->database = GDO_PATH . GDO_FILES_DIR . '/' . $dbName;
+		$this->dbmsClose();
 	}
 	
 	public function dbmsUseDB(string $dbName): void
 	{
-		$this->dbmsQry("USE {$dbName}");
+		$this->dbmsOpen(GDO_DB_HOST, GDO_DB_USER, GDO_DB_PASS, $dbName, GDO_DB_PORT);
 	}
 	
 	public function dbmsDropDB(string $dbName): void
 	{
-		$this->dbmsQry("DROP DATABASE {$dbName}");
+		$database = GDO_PATH . GDO_FILES_DIR . '/' . $dbName;
+		FileUtil::removeFile($database);
 	}
 	
 	##############
@@ -365,6 +392,16 @@ final class Module_DBMS extends GDO_Module
 	{
 		$time = $time?:time();
 		return "DATETIME({$time}, 'unixepoch')";
+	}
+	
+	public function collate_utf8_cs(string $a, string $b): int
+	{
+		return Strings::compare($a, $b, true);
+	}
+	
+	public function collate_utf8_ci(string $a, string $b): int
+	{
+		return Strings::compare($a, $b, false);
 	}
 	
 	###############
