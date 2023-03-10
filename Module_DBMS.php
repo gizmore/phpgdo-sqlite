@@ -28,6 +28,7 @@ use GDO\Core\GDT_ObjectSelect;
 use GDO\Util\FileUtil;
 use GDO\Core\Application;
 use GDO\Util\Strings;
+use GDO\File\GDT_Files;
 
 /**
  * SQLite DBMS module for phpgdo.
@@ -40,8 +41,8 @@ final class Module_DBMS extends GDO_Module
 {
 	public int $priority = 7;
 	
-	private ?string $database = null; # absolute database file path
-	private ?\SQLite3 $sqLite = null; # connection
+// 	private ?string $database = null; # absolute database file path
+	private static ?\SQLite3 $sqLite = null; # connection
 	private bool $inTransaction = false;
 
 	##############
@@ -61,6 +62,33 @@ final class Module_DBMS extends GDO_Module
 		ini_set('sqlite3.defensive', true);
 	}
 	
+	##########
+	### DB ###
+	##########
+	public function dbmsCreateDB(string $dbName): void
+	{
+// 		FileUtil::removeFile($this->dbPath($dbName));
+	}
+	
+	public function dbmsUseDB(string $dbName): void
+	{
+		$this->dbmsOpen(GDO_DB_HOST, GDO_DB_USER, GDO_DB_PASS, $dbName, GDO_DB_PORT);
+	}
+	
+	public function dbmsDropDB(string $dbName): void
+	{
+		$this->dbmsClose();
+// 		if (@rename($this->dbPath($dbName), $this->dbPath($dbName.'.OLD')))
+// 		{
+			FileUtil::removeFile($this->dbPath($dbName), false);
+// 		}
+	}
+	
+	private function dbPath(string $filename): string
+	{
+		return GDO_PATH . 'protected/' . $filename;
+	}
+	
 	################
 	### DBMS API ###
 	################
@@ -70,8 +98,8 @@ final class Module_DBMS extends GDO_Module
 	 */
 	public function dbmsOpen(string $host, string $user, string $pass, string $database=null, int $port=3306): \SQLite3
 	{
-		$this->dbmsCreateDB($database);
-		$this->sqLite = new \SQLite3($this->database);
+		$this->dbmsClose();
+		self::$sqLite = new \SQLite3($this->dbPath($database));
 		$this->dbmsQry('PRAGMA encoding = "UTF-8"');
 		$this->dbmsQry('PRAGMA journal_mode = "'.GDO_DB_ENGINE.'"');
 		if (!Application::$INSTANCE->isInstall())
@@ -79,19 +107,19 @@ final class Module_DBMS extends GDO_Module
 			$this->dbmsForeignKeys(true);
 			$this->dbmsQry('PRAGMA query_only = "'.(GDO_DB_READONLY?'ON':'OFF').'"');
 		}
-		$this->sqLite->createCollation('ascii_cs', 'strnatcmp');
-		$this->sqLite->createCollation('ascii_ci', 'strnatcasecmp');
-		$this->sqLite->createCollation('utf8_cs', [$this, 'collate_utf8_cs']);
-		$this->sqLite->createCollation('utf8_ci', [$this, 'collate_utf8_ci']);
-		return $this->sqLite;
+		self::$sqLite->createCollation('ascii_cs', 'strnatcmp');
+		self::$sqLite->createCollation('ascii_ci', 'strnatcasecmp');
+		self::$sqLite->createCollation('utf8_cs', [$this, 'collate_utf8_cs']);
+		self::$sqLite->createCollation('utf8_ci', [$this, 'collate_utf8_ci']);
+		return self::$sqLite;
 	}
 	
 	public function dbmsClose(): void
 	{
-		if (isset($this->sqLite))
+		if (self::$sqLite)
 		{
-			$this->sqLite->close();
-			unset($this->sqLite);
+			self::$sqLite->close();
+			self::$sqLite = null;
 		}
 	}
 	
@@ -108,7 +136,7 @@ final class Module_DBMS extends GDO_Module
 	
 	public function dbmsQuery(string $query, bool $buffered=true)
 	{
-		$result = @$this->sqLite->query($query);
+		$result = self::$sqLite->query($query);
 		if (!$result)
 		{
 			throw new GDO_DBException('err_db', [$this->dbmsErrno(), $this->dbmsError(), html($query)]);
@@ -169,12 +197,12 @@ final class Module_DBMS extends GDO_Module
 	
 	public function dbmsInsertId(): int
 	{
-		return $this->sqLite->lastInsertRowID();
+		return self::$sqLite->lastInsertRowID();
 	}
 	
 	public function dbmsAffected(): int
 	{
-		return $this->sqLite->changes();
+		return self::$sqLite->changes();
 	}
 	
 	public function dbmsBegin(): void
@@ -217,12 +245,12 @@ final class Module_DBMS extends GDO_Module
 	
 	public function dbmsError(): string
 	{
-		return $this->sqLite->lastErrorMsg();
+		return self::$sqLite->lastErrorMsg();
 	}
 	
 	public function dbmsErrno(): int
 	{
-		return $this->sqLite->lastErrorCode();
+		return self::$sqLite->lastErrorCode();
 	}
 	
 	############
@@ -254,26 +282,6 @@ final class Module_DBMS extends GDO_Module
 				$command = '';
 			}
 		}
-	}
-	
-	##########
-	### DB ###
-	##########
-	public function dbmsCreateDB(string $dbName): void
-	{
-		$this->database = GDO_PATH . GDO_FILES_DIR . '/' . $dbName;
-		$this->dbmsClose();
-	}
-	
-	public function dbmsUseDB(string $dbName): void
-	{
-		$this->dbmsOpen(GDO_DB_HOST, GDO_DB_USER, GDO_DB_PASS, $dbName, GDO_DB_PORT);
-	}
-	
-	public function dbmsDropDB(string $dbName): void
-	{
-		$database = GDO_PATH . GDO_FILES_DIR . '/' . $dbName;
-		FileUtil::removeFile($database);
 	}
 	
 	##############
@@ -325,7 +333,8 @@ final class Module_DBMS extends GDO_Module
 		
 		foreach ($gdo->gdoColumnsCache() as $column)
 		{
-			if ($column instanceof GDT_Object)
+			if ( ($column instanceof GDT_Object) &&
+				 (!$column instanceof GDT_Files) )
 			{
 				$columns[] = $this->_objfk($column);
 			}
@@ -355,6 +364,10 @@ final class Module_DBMS extends GDO_Module
 		array_unshift($classes, get_class($gdt));
 		foreach ($classes as $classname)
 		{
+			if ($gdt->getName() === 'image_files')
+			{
+				xdebug_break();
+			}
 			$classname = substr($classname, 4);
 			$classname = str_replace('\\', '_', $classname);
 			if (method_exists($this, $classname))
@@ -370,12 +383,18 @@ final class Module_DBMS extends GDO_Module
 	##############
 	public function dbmsEscape(string $var): string
 	{
-		return str_replace(['\\', "'"], ['\\\\', '\\\''], $var);
+		return str_replace(['\\', "'"], ['\\\\', '\'\''], $var);
 	}
 	
 	public function dbmsQuote(string $var): string
 	{
+// 		return sprintf("X'%s'", bin2hex($var));
 		return sprintf("'%s'", $this->dbmsEscape($var));
+	}
+	
+	public function dbmsRandom(): string
+	{
+		return 'RANDOM()';
 	}
 	
 	public function dbmsConcat(string ...$fields): string
@@ -441,7 +460,7 @@ final class Module_DBMS extends GDO_Module
 	
 	public function Core_GDT_Float(GDT_Float $gdt): string
 	{
-		$unsigned = $this->unsigned ? " UNSIGNED" : GDT::EMPTY_STRING;
+		$unsigned = $gdt->unsigned ? " UNSIGNED" : GDT::EMPTY_STRING;
 		return "{$gdt->identifier()} FLOAT{$unsigned}{$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
 	}
 	
@@ -453,15 +472,17 @@ final class Module_DBMS extends GDO_Module
 
 	public function Core_GDT_Char(GDT_Char $gdt): string
 	{
-		return "{$gdt->identifier()} CHAR({$gdt->max})" .
+		$char = $gdt->isBinary() ? 'BLOB' : 'CHAR';
+		return "{$gdt->identifier()} $char({$gdt->max})" .
 			$this->gdoNullDefine($gdt) .
 			$this->gdoInitialDefine($gdt);
 	}
 	
 	public function Core_GDT_String(GDT_String $gdt): string
 	{
+		$char = $gdt->isBinary() ? 'BLOB' : 'VARCHAR';
 		$null = $this->gdoNullDefine($gdt);
-		return "{$gdt->identifier()} VARCHAR({$gdt->max}) {$null}";
+		return "{$gdt->identifier()} {$char}({$gdt->max}) {$null}";
 	}
 	
 	public function Core_GDT_Text(GDT_Text $gdt): string
@@ -471,7 +492,8 @@ final class Module_DBMS extends GDO_Module
 	
 	public function Core_GDT_TextB(GDT_Text $gdt): string
 	{
-		return "TEXT({$gdt->max}) {$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
+		$char = $gdt->isBinary() ? 'BLOB' : 'TEXT';
+		return "{$char}({$gdt->max}) {$this->gdoNullDefine($gdt)}{$this->gdoInitialDefine($gdt)}";
 	}
 	
 	public function Core_GDT_CreatedAt(GDT_CreatedAt $gdt) : string
@@ -507,11 +529,21 @@ final class Module_DBMS extends GDO_Module
 		return $this->Core_GDT_Object($gdt);
 	}
 	
+	public function File_GDT_Files(GDT_Files $gdt): string
+	{
+		return '';
+	}
+	
 	/**
 	 * Take the foreign key primary key definition and use str_replace to convert to foreign key definition.
 	 */
 	public function Core_GDT_Object($gdt): string
 	{
+		if ($gdt instanceof GDT_Files)
+		{
+			return '';
+		}
+		
 		if ( !($table = $gdt->table))
 		{
 			throw new GDO_Error('err_gdo_object_no_table', [
