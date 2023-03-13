@@ -235,12 +235,14 @@ final class Module_DBMS extends GDO_Module
 	/**
 	 * @TODO In case sqlite session locking is required, implement an flock based one.
 	 */
-	public function dbmsLock(string $lock, int $timeout=30): void
+	public function dbmsLock(string $lock, int $timeout=30): bool
 	{
+		return true;
 	}
 	
-	public function dbmsUnlock(string $lock): void
+	public function dbmsUnlock(string $lock): bool
 	{
+		return true;
 	}
 	
 	public function dbmsError(): string
